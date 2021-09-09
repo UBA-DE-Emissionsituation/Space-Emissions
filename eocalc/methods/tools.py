@@ -1,54 +1,99 @@
 # -*- coding: utf-8 -*-
 # tools.py
 # build by Enrico Dammers (TNO, enrico.dammers@tno.nl)
-# last edited <_2020_08_12-03:29:22_AM > too lazy to update this
-# %%
-#  for testing move to other directory
+# last edited <_2021_09_07-17:15:22 > too lazy to update this
 import os
-
-from pandas.core.base import DataError
-os.chdir('../../')
-
-
-"""Basic toolbox for space emission calculator used in emission calcs."""
-from re import sub
-from eocalc.methods.fioletov import *
-import numpy as np
-import pandas as pd
-import scipy.special
-#import binas as binas
-import eocalc.methods.binas as binas
-import netCDF4
-from datetime import date, timedelta
 import glob
-import matplotlib.dates as dates
 import datetime
 import time
+
+import numpy as np
+import pandas as pd
+import netCDF4
+import scipy.special
+from multiprocessing import Pool
+from pandas.core.base import DataError
+from datetime import date, timedelta
+import matplotlib.dates as dates
+
+import eocalc.methods.binas as binas
+from eocalc.methods.fioletov import *
+
+"""Toolbox with core functions used in the satellite observations based emission calculator.
+# Contains all formulas to calculate gaussian plumes
+# Module based on (Fioletov et al., 2017; Dammers et al., 2021)
+# https://acp.copernicus.org/articles/17/12597/2017/ / TODO add paper
+# Mind; x,y are in km x km space, not degrees, so rotation and adjustment needed compared to lat lon.
+"""
 # fixed fileformat < batch tropomi obs in monthly 20x15 degree files
+# TODO find better position, potentially a settings control file
 interval_lon = 20
 interval_lat = 15
 
-# formulas gaussian plumes
-# based on (Fioletov et al., 2017; Dammers et al., 2021)
-# https://acp.copernicus.org/articles/17/12597/2017/
-# any location can be described as VCD(x,y) = sum(flow_contribution_i(x,y) * emis_i) + bias
-# for this we need VCD's, added windfields to calculate flow, and potential source locations (grid)
-# x,y are in km x km space, not degrees, so rotation and adjustment needed compared to lat lon.
-# %%
-# winddir/speed back to u,v 
-def winddir_speed_to_u_v(wind_spd, wind_dir):
+def winddir_speed_to_u_v(wind_spd:float, wind_dir:float)->tuple:
+    '''     
+    Function to calculate the wind components u(eastward),v(northward) as a function of wind speed and direction.
+
+    Parameters
+    ----
+    wind_spd    :   float / np.ndarray
+        wind speed
+    wind_dir    :   float / np.ndarray
+         wind direction 
+
+    Returns
+    -------
+    tuple containing:
+    u : float / np.ndarray
+        eastward wind component 
+    v : float / np.ndarray
+        northward wind component 
+
+    ''' 
     dir_rp1 = wind_dir * 2 * np.pi / 360.
     dir_rp = np.array(dir_rp1) + np.pi / 2
     u = wind_spd * np.cos(dir_rp)
     v = -wind_spd * np.sin(dir_rp)
     return u, v
         
-# wind speed
-def calc_wind_speed(u,v):
+def calc_wind_speed(u:float,v:float)->np.ndarray:
+    '''     
+    Function to calculate the wind speed as function of eastward and northward wind velocities.
+
+    Parameters
+    ----
+    u    :   float / np.ndarray
+        eastward wind component 
+    v    :   float / np.ndarray
+        northward wind component 
+
+    Returns
+    -------
+    windspeed : float / np.ndarray
+        wind speed.
+
+
+    ''' 
     return np.sqrt(np.array(u)**2.+np.array(v)**2.)
 
-# winddirection
-def calc_wind_direction(u, v):
+def calc_wind_direction(u:float, v:float)->np.ndarray:
+    '''     
+    Function to calculate the wind direction as function of eastward and northward wind velocities.
+
+    Parameters
+    ----
+    u    :   float / np.ndarray
+        eastward wind component 
+    v    :   float / np.ndarray
+        northward wind component 
+
+    Returns
+    -------
+    wind_dir : float / np.ndarray
+        wind direction.
+
+
+    ''' 
     # calc wind direction from u,v
     # ensure array form
     u = np.array(u)
@@ -68,8 +113,31 @@ def calc_wind_direction(u, v):
 
     return wind_dir
     
-# rotation
-def rotate_plume_around_point(reflon, reflat, lon, lat, wind_direction):
+def rotate_plume_around_point(reflon, reflat, lon, lat, wind_direction)->tuple:
+    '''     
+    Function to calculate the position of the observation in relation to the wind direction and reference position.
+
+    Parameters
+    ----
+    reflon    :   float
+        longitudinal position of reference (source)
+    reflat    :   float
+        latitudinal position of reference (source)
+    lon    :   float or np.ndarray of floats
+        longitudinal position of observation
+    lat    :   float or np.ndarray of floats
+        latitudinal position of observation
+
+    Returns
+    -------
+    tuple containing
+    x_grid : float / np.ndarray
+        cross wind positions after rotation as function as wind direction.
+    y_grid : float / np.ndarray
+        down wind positions after rotation as function as wind direction.
+
+
+    ''' 
     # rotate lat/lon grid plume in relation to a point
     dtr = np.pi / 180. # conversion degrees to rad
     x_globe = binas.earth_radius * dtr * (lon - reflon) * np.cos(reflat * dtr)
@@ -79,16 +147,72 @@ def rotate_plume_around_point(reflon, reflat, lon, lat, wind_direction):
     x_grid = x_globe * cos_wd + y_globe * sin_wd
     y_grid = -x_globe * sin_wd + y_globe * cos_wd
     return x_grid, y_grid
+
+def rotate_plume_around_point_cos_sin_pre(reflon:float, reflat:float, lon:np.ndarray, lat:np.ndarray, cos_wd:np.ndarray, sin_wd:np.ndarray)->tuple:
+    '''     
+    Function to calculate the position of the observation in relation to the wind direction and reference position, with cosines and sines precalculated.
+
+    Parameters
+    ----
+    reflon    :   float
+        longitudinal position of reference (source)
+    reflat    :   float
+        latitudinal position of reference (source)
+    lon    :   float or np.ndarray of floats
+        longitudinal position of observation
+    lat    :   float or np.ndarray of floats
+        latitudinal position of observation
+    cos_wd    :   float or np.ndarray of floats
+        precalc cosine approximation to reduce the cpu cost of source receptor relations
+    sin_wd    :   float or np.ndarray of floats
+        precalc sin approximation to reduce the cpu cost of source receptor relations
+
+    Returns
+    -------
+    tuple containing
+    x_grid : float / np.ndarray
+        cross wind positions after rotation as function as wind direction.
+    y_grid : float / np.ndarray
+        down wind positions after rotation as function as wind direction.
+
+
+    ''' 
+    # rotate lat/lon grid plume in relation to a point
+    dtr = np.pi / 180. # conversion degrees to rad
+    x_globe = binas.earth_radius * dtr * (lon - reflon) * np.cos(reflat * dtr)
+    y_globe = binas.earth_radius * dtr * (lat - reflat)
+    # cos_wd = np.cos(-wind_direction * dtr)
+    # sin_wd = np.sin(-wind_direction * dtr)
+    x_grid = x_globe * cos_wd + y_globe * sin_wd
+    y_grid = -x_globe * sin_wd + y_globe * cos_wd
+    return x_grid, y_grid
     
-# footprint mapper --> for if we want to oversample individual observations to create more contrast/sharpness
+# TODO footprint mapper --> for if we want to oversample individual observations to create more contrast/sharpness
+# def footprint_mapper()
+
+def function_adjust_plumewidth(y:float, plumewidth:float)->float:
+    '''     
+    Function to calculate an upwind correction to the shape of the plume.
+
+    Parameters
+    ----
+    y    :   float
+        wind speed
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
 
 
-# plumewidth adjustment, shown to fit real life plumes better than basic function.
-# plumewidth can also be calculated in more detail using radiation etc (Nassar, et al., 201?, CO2 powerplant paper), not used here
-def function_adjust_plumewidth(y, plumewidth):
+    Returns
+    -------
+    val2 : float
+        upwind adjusted plumewidth
+
+
+    '''  
     if np.size(y) > 1:
         plumewidth_adj = np.full(len(y), plumewidth)
-        sel_y = np.where(y <= 0)
+        sel_y = (y <= 0)
+        # sel_y = np.where(y <= 0)
         plumewidth_adj[sel_y] = np.sqrt((plumewidth ** 2) - 1.5 * y[sel_y])
     else:
         if y <= 0:
@@ -97,33 +221,127 @@ def function_adjust_plumewidth(y, plumewidth):
             plumewidth_adj = plumewidth
     return plumewidth_adj
 
-# crosswind diffusion
-def flow_function_f(x, y, plumewidth):
+def flow_function_f(x:float, y:float, plumewidth:float)->float:
+    '''     
+    Function describing the diffusion in the cross wind direction perpendicular to the wind direction.
+
+    Parameters
+    ----
+    x    :   float
+        parameter describing the up/downwind position
+    y    :   float
+        wind speed
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
+
+
+    Returns
+    -------
+    val2 : float
+        calculated cross wind diffusion part of the source receptor relation (element in A in Ax=B)
+
+
+    '''  
     val = 1. / (function_adjust_plumewidth(y, plumewidth) * np.sqrt(2. * np.pi))
     val2 = val * np.exp(-(x ** 2.) / (2. * function_adjust_plumewidth(y, plumewidth) ** 2.))
     return val2
 
-# downwind advection / diffusion
-def flow_function_g(y, s, plumewidth, decay):
+def flow_function_g(y:float, s:float, plumewidth:float, decay:float)->float:
+    '''     
+    Function describing the diffusion smoothed with an exponential function describing the decay of the pollutant .
+
+    Parameters
+    ----
+    y    :   float
+        parameter describing the up/downwind position
+    s    :   float
+        wind speed
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
+    decay    :   float
+        parameter describing the decay rate
+
+
+    Returns
+    -------
+    val2 : float
+        calculated diffusion part of the source receptor relation (element in A in Ax=B)
+
+
+    '''  
     decay_adj = decay / s
     val = (decay_adj / 2.) * np.exp((decay_adj * (decay_adj * plumewidth ** 2. + 2. * y)) / 2.)
     var1 = (decay_adj * (plumewidth ** 2.) + y) / (np.sqrt(2) * plumewidth)
     val2 = val * scipy.special.erfc(var1)
     return val2
 
-# i.e. flowfun to calculate the factors in arrays etc
-# convolution of f/g essentially.
-def constant_flowfuntion(x1, x2, s1, decay, plumewidth): 
-    fout = flow_function_f(x1, x2, plumewidth) * flow_function_g(x2, s1, plumewidth, decay)
+def constant_flowfunction(x:float, y:float, s:float, decay:float, plumewidth:float)->float: 
+    '''     
+    Function to calculate a single entry (one source, and one observation) of the source receptor relations (matrix A) between the source locations and satellite observations.
+
+    Parameters
+    ----
+    x    :   float
+        parameter describing the cross wind position perpendicular to the wind direction
+    y    :   float
+        parameter describing the up/downwind position
+    s    :   float
+        wind speed
+    decay    :   float
+        parameter describing the decay rate
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
+
+    Returns
+    -------
+    fout : float
+        calculated source receptor relation (element in A in Ax=B)
+
+
+    '''   
+    fout = flow_function_f(x, y, plumewidth) * flow_function_g(y, s, plumewidth, decay)
     return fout
 
+def calc_entry_linear_system(datadf:pd.DataFrame,nss:int,lin_shape_1:int,source_lon:float,source_lat:float,lon_var:str,lat_var:str,windspeed_var:str,winddirec_var:str,decay:float,plumewidth:float,cos_wd:np.ndarray,sin_wd:np.ndarray)->tuple:
+    '''     
+    Function to calculate a single entry (one source) of the source receptor relations (matrix A) between the source locations and satellite observations.
+    To be used with the multiprocessing setup.
+
+    Parameters
+    ----
+    datadf    :   pd.DataFrame
+        Dataframe containing the source locations. Needs to contain the 'lon' and 'lat' variables.
+    nss    :   int
+        Dataframe containing the observation locations. lon_var and lat_var need to be part of this dataframe.
+    lin_shape_1    :   int
+        Number of observations to calculate the source receptor relations for.
+    source_lon    :   float
+        Longitudinal source location
+    source_lat    :   float
+        Latgitudinal source location
+    lat_var    :   str
+        Variable name to be used for the latitude variable in the (global) df_obs dataframe
+    lon_var    :   str
+        Variable name to be used for the longitude variable in the (global) df_obs dataframe
+    windspeed_var    :   str
+        Variable name to be used for the windspeed variable in the (global) df_obs dataframe
+    winddirec_var    :   str
+        Variable name to be used for the winddirection variable in the (global) df_obs dataframe
+    decay    :   float
+        parameter describing the decay rate
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
+    cos_wd    :   np.ndarray
+        precalc cosine approximation to reduce the cpu cost of source receptor relations
+    sin_wd    :   np.ndarray
+        precalc sin approximation to reduce the cpu cost of source receptor relations
+    Returns
+    -------
+    nss,flow_rot,x_rot,y_rot : tuple containing (int,np.ndarray,np.ndarray,np.ndarray)
+        iteration number,source receptor relations, and rotated position x and y of the receptor compared to the source
 
 
-
-# legendre bias function or other
-
-# setup_lin_matrix --> create the matrix for AX=B
-def calc_entry_linear_system(datadf,nss,lin_shape_1,source_lon,source_lat,lon_var,lat_var,windspeed_var,winddirec_var,decay,plumewidth):
+    '''   
     flow_rot = np.zeros(lin_shape_1,float)
     x_rot = np.zeros(lin_shape_1,float)
     y_rot = np.zeros(lin_shape_1,float)
@@ -134,16 +352,17 @@ def calc_entry_linear_system(datadf,nss,lin_shape_1,source_lon,source_lat,lon_va
             np.abs(datadf[lat_var].values - source_lat) < 4.0))
     # if len(datadf[lon_var].values[selec]) == 0:
         # continue
+
     rotated = np.array(
-        rotate_plume_around_point(source_lon,source_lat, datadf[lon_var].values[selec], datadf[lat_var].values[selec],
-                            datadf[winddirec_var].values[selec]))
+        rotate_plume_around_point_cos_sin_pre(source_lon,source_lat, datadf[lon_var].values[selec], datadf[lat_var].values[selec],
+                            cos_wd[selec],sin_wd[selec]))
     # write to rotation x,y matrices
     x_rot[selec] = rotated[0, :]
     y_rot[selec] = rotated[1, :]
 
     if len(flow_rot[selec]) > 1:  # [selec2]) > 1:
         indexi = np.arange(lin_shape_1)[selec]  # [selec2]
-        flow_rot[indexi] = constant_flowfuntion(
+        flow_rot[indexi] = constant_flowfunction(
             x_rot[indexi], y_rot[indexi], datadf[windspeed_var].values[indexi],
             decay,plumewidth)
     else:
@@ -154,10 +373,41 @@ def calc_entry_linear_system(datadf,nss,lin_shape_1,source_lon,source_lat,lon_va
         print('done',nss)
     return nss,flow_rot,x_rot,y_rot
 
-# fitting operator?
+def multisource_emission_fit(df_sources:pd.DataFrame, df_obs:pd.DataFrame, lon_var:str, lat_var:str, plumewidth:float, decay:float, 
+                             minflow=0.0, multiprocessing=False,multiprocessing_workers=4,multiprocessing_split_up=False)->np.ndarray:
+    '''     
+    Function to calculate the source receptor relations (matrix A) between the source locations and satellite observations.
 
-def multisource_emission_fit(df_sources, df_obs, lon_var, lat_var, plumewidth, decay, west,east,south,north,
-                             minflow=0.0, multiprocessing=False,multiprocessing_workers=16):
+    Parameters
+    ----
+    df_sources    :   pd.DataFrame
+        Dataframe containing the source locations. Needs to contain the 'lon' and 'lat' variables.
+    df_obs    :   pd.DataFrame
+        Dataframe containing the observation locations. lon_var and lat_var need to be part of this dataframe.
+    lat_var    :   str
+        Variable name to be used for the latitude variable in the (global) df_obs dataframe
+    lon_var    :   str
+        Variable name to be used for the longitude variable in the (global) df_obs dataframe
+    plumewidth    :   float
+        parameter describing the combined width of the gaussian diffusion and pixel footprint.
+    decay    :   float
+        parameter describing the decay rate
+    minflow    :   float
+        lower cap to linear_array values. Default set to zero. Can be used to reduce the number of significant entries in the linear array.
+    multiprocessing    :   bool
+        Toggle to turn multiprocessing on and off, to speed up the calculations with the downside of increasing mem usage. Default is turned off.
+    multiprocessing_workers    :   int
+        Used to define the number of processors used for the multiprocessing. Downside is the increase in mem usage. Default is set to 4 if used.
+    multiprocessing_split_up    :   bool
+        Toggle to split the multiprocessing in multiple parts, to reduce the mem usage. Default is turned off.
+
+    Returns
+    -------
+    linear_array : array(float)
+        array of floats containing the calculated flow function parameters (A in Ax=B)
+
+
+    '''                
     # define arrays
     n_sources =  len(df_sources)
     n_obs =  len(df_obs)
@@ -171,9 +421,57 @@ def multisource_emission_fit(df_sources, df_obs, lon_var, lat_var, plumewidth, d
     # loop through the observations
     if multiprocessing == True:
         #$ TODO implement multiprocessing
-        print('Multi processing not implemented yet')
-        raise ValueError
+        if multiprocessing_split_up is False:
+            split_n=1
+        n_sources_steps  = int(np.ceil(n_sources/split_n))
+        for nn in range(split_n):
+            print('splitting operation into',split_n,'steps, now step',nn)
+            io_pool = Pool(processes=multiprocessing_workers)
+            print('multi_thread')
+            dtr = np.pi / 180.
+            wind_lut = numpy.arange(0,361,0.1)
+            cos_wd_int = np.cos(-wind_lut * dtr)
+            sin_wd_int = np.sin(-wind_lut * dtr)
+            print(df_obs.winddirection.max(),df_obs.winddirection.min())
+            # global cos_wd
+            # global sin_wd
+            cos_wd = cos_wd_int[(df_obs.winddirection.round(1).values*10).astype(int)]
+            sin_wd = sin_wd_int[(df_obs.winddirection.round(1).values*10).astype(int)]
+
+            unpacked_results = io_pool.map(multi_helper,
+                    [(df_obs, nss,n_obs,
+                    df_sources['lon'].iloc[nss],
+                    df_sources['lat'].iloc[nss],
+                    lon_var,lat_var,'windspeed','winddirection',decay,plumewidth,cos_wd,sin_wd)
+                    for
+                    nss in range(n_sources_steps*nn,np.min([n_sources_steps*(nn+1),n_sources]))])
+            print("done pool, closing")
+            io_pool.close()
+            print("closed pool, joining")
+            io_pool.join()
+            print("pool joined")
+            for unp in unpacked_results:
+                linear_array[:,unp[0]] = unp[1]
+                # x_rot[unp[0],:] = unp[2]
+                # y_rot[unp[0],:] = unp[3]
+        # set nan to zero
+        for ns in range(n_sources):
+            linear_array[np.isnan(linear_array[:, ns]), ns] = 0.0
+        # print('Multi processing not implemented yet')
+        # raise ValueError
     else:
+        # first calc cos sin of 360*10 values.
+        # round to one value
+        # select by value
+        dtr = np.pi / 180.
+        wind_lut = numpy.arange(0,361,0.1)
+        cos_wd_int = np.cos(-wind_lut * dtr)
+        sin_wd_int = np.sin(-wind_lut * dtr)
+        print(df_obs.winddirection.max(),df_obs.winddirection.min())
+        cos_wd = cos_wd_int[(df_obs.winddirection.round(1).values*10).astype(int)]
+        sin_wd = sin_wd_int[(df_obs.winddirection.round(1).values*10).astype(int)]
+        # cos_wd = np.cos(-wind_direction * dtr)
+        # sin_wd = np.sin(-wind_direction * dtr)
         for ns in range(n_sources):
             if np.mod(ns, 100) == 0:
                 print(ns, 'out of', n_sources)
@@ -184,43 +482,87 @@ def multisource_emission_fit(df_sources, df_obs, lon_var, lat_var, plumewidth, d
                     np.abs(df_obs[lat_var].values - line['lat']) < 4.0))
             if len(df_obs[lon_var].values[selection_near]) == 0:
                 continue
+            # rotated_obs = np.array(
+            #     rotate_plume_around_point(line['lon'], 
+            #                               line['lat'], 
+            #                               df_obs[lon_var].values[selection_near], 
+            #                               df_obs[lat_var].values[selection_near],df_obs['winddirection'].values[selection_near]))
             rotated_obs = np.array(
-                rotate_plume_around_point(line['lon'], 
+                rotate_plume_around_point_cos_sin_pre(line['lon'], 
                                           line['lat'], 
                                           df_obs[lon_var].values[selection_near], 
-                                          df_obs[lat_var].values[selection_near],df_obs['winddirection'].values[selection_near]))
+                                          df_obs[lat_var].values[selection_near],cos_wd[selection_near],sin_wd[selection_near]))
             # TODO maybe return rotated obs?
             x_rotated[ns, selection_near] = rotated_obs[0, :]
             y_rotated[ns, selection_near] = rotated_obs[1, :]
             if len(linear_array[selection_near, ns]) > 1:  # [selection_near2]) > 1:
                 indexi = np.arange(n_obs)[selection_near]  # [selection_near2]
                 # chose 1 for E and 0. for B to calc without strengths etc
-                linear_array[indexi, ns] = constant_flowfuntion(
+                linear_array[indexi, ns] = constant_flowfunction(
                     x_rotated[ns, indexi], y_rotated[ns, indexi], wind_obs[indexi],
                     decay, plumewidth)  
                 # TODO maybe max flow value to only allow "significant" values
                 linear_array[(linear_array[:, ns] < minflow), ns] = 0.0
+                # set low wind speed plumes (and nan values) to zero
+                linear_array[np.isnan(linear_array[:, ns]), ns] = 0.0
     return linear_array
     
-# multi source helper --> if multisourcing operations
-def multi_helper(args):
+def multi_helper(args)->float:
+    '''     
+    Function used in the multiprocessing.map chain. Allows for the communication of multiple input variables to a single function.
+
+    Parameters
+    ----
+    args    :   tuple
+        args to calc_entry_linear_system function
+        
+    Returns
+    -------
+    calc_entry_linear_system(*args) : array of floats
+        array containing calculated entries of the linear system
+    '''
     return calc_entry_linear_system(*args)
 
-# flatten lists --> little helper to correct obsession with lists
-def flatten_list(list_of_lists):
+def flatten_list(list_of_lists=list)->list:
+    '''     
+    Function to flatten a list of lists into a single list.
+
+    Parameters
+    ----
+    list of multiple lists    :   list
+        List with several lists in it of potentially different lengths
+
+    Returns
+    -------
+    flattened list
+    '''
     return [item for sublist in list_of_lists for item in sublist]
 
-# create basic emission fields from a inventory for comparison?
-def read_subset_data(region: MultiPolygon, filelist: list, add_region_offset = [None,None]):
-    # TODO Make this work with regions wrapping around to long < -180 or long > 180?
-    if add_region_offset[1] is None:
-        min_lat, max_lat = region.bounds[1], region.bounds[3]
-    else:
-        min_lat, max_lat = region.bounds[1]-add_region_offset[1], region.bounds[3]+add_region_offset[1]
-    if add_region_offset[0] is None:
-        min_long, max_long = region.bounds[0], region.bounds[2] # or region +- 5degrees
-    else:
-        min_long, max_long = region.bounds[0]-add_region_offset[0], region.bounds[2]+add_region_offset[1] # or region +- 5degrees
+def read_subset_data(region: MultiPolygon, filelist: list, add_region_offset = [0.,0.])->pd.DataFrame:
+    '''     
+    Function to read variables from a selection of files. Only observations within the defined region (plus offset) are selected.
+
+    Parameters
+    ----
+    region    :   MultiPolygon
+        Polygon spanning the region of interest. Typically country level.
+    filelist    :   list
+        List of filenames to read
+    add_region_offset    :   list of 2 floats
+        Additional offset to the west/east and north/south limits of the MultiPolygon used to span the domain.
+
+    Returns
+    -------
+    datap : pd.DataFrame
+        dataframe containing all observations (from the filelist) within the domain (plus offset)
+
+    TODO
+    -------     
+    Make this work with regions wrapping around to long < -180 or long > 180
+    '''
+    
+    min_lat, max_lat = region.bounds[1]-add_region_offset[1], region.bounds[3]+add_region_offset[1]
+    min_long, max_long = region.bounds[0]-add_region_offset[0], region.bounds[2]+add_region_offset[1] # or region +- 5degrees
 
     datap = pd.DataFrame()
     # turn into xarray concate?
@@ -245,12 +587,31 @@ def read_subset_data(region: MultiPolygon, filelist: list, add_region_offset = [
                                        (datap_tmp[lat_var]<max_lat))])
     return datap
 
+def assure_data_availability(region: MultiPolygon,day: date,force_rebuild = False, force_pass = False,satellite_name = 'Tropomi') -> list:
+    '''     
+    Function to check the availability and start the creation of satellite sub datasets for faster access
 
-# read data
-def assure_data_availability(region,day: date,force_rebuild = False, force_pass = False,satellite_name = 'Tropomi') -> list:
-    # check lon_min,lon_max,lat_min,lat_max
-    # (5.872058868408317, 47.26990127563522, 15.028479576110897, 55.05652618408209)
-    # basic patterns
+    Parameters
+    ----
+    region    :   MultiPolygon
+        Polygon spanning the region of interest. Typically country level.
+    day    :   date
+        Date used for creating an interval to make a selection of observations
+    force_rebuild    :   bool
+        Toggle to force the rebuild of subsets, by default set to False 
+    force_pass    :   bool
+        Toggle to skip the creation of subset, by default set to False # TODO needs to be implemented fully
+    satellite_name    :   string
+        name of the satellite / product, by default set to Tropomi
+
+    Returns
+    -------
+    expected_files : list
+        list of subsets names containing data within the boundaries of the region
+
+
+    '''
+
     lon_min,lon_max = region.bounds[0], region.bounds[2] #lons
     lat_min,lat_max = region.bounds[1], region.bounds[3] #lats
     print('region_bounds',region.bounds)
@@ -306,10 +667,26 @@ def assure_data_availability(region,day: date,force_rebuild = False, force_pass 
 
     return expected_files
 
-def filter_files_by_latlon(files, lat_range, lon_range):
-    '''
-    from CDF_tools.py @ CrIS dev package ECCC
-    Function that filters through lists of files by lat/lon
+def filter_files_by_latlon(files:list, lat_range:list, lon_range:list)->list:
+    '''     Based on function from CDF_tools.py @ CrIS dev package ECCC
+            Function that filters through lists of files by lat/lon
+
+    Parameters
+    ----
+    files    :   list
+        list of strings containing filenames
+    lat_range    :   list
+        list containing the to filter on lat range with south and northern location
+    lon_range    :   list
+        list containing the to filter on lon range with west and eastern location
+
+
+    Returns
+    -------
+    filtdirs : list
+        list of remaining filenames that fall within the longitudinal and latitudinal boundaries
+
+
     '''
     lat_range = lat_range if lat_range[0] is not None else [-90, 90]
     lon_range = lon_range if lon_range[0] is not None else [-180, 180]
@@ -339,10 +716,23 @@ def filter_files_by_latlon(files, lat_range, lon_range):
     # TODO make it smart enough to accept multiple pieces of old files?
     return filtdirs
 
-def latlon_fromfile(directory):
-    '''
-    from CDF_tools.py @ CrIS dev package ECCC
-    Makes a list of the lat range and lon range from parsing directory path
+def latlon_fromfile(directory:str)->tuple:
+    ''' Based on function from CDF_tools.py @ CrIS dev package ECCC
+        Makes a list of the lat range and lon range from parsing directory path
+
+    Parameters
+    ----
+    directory    :   str
+        filename containing lon and lat range in p000_0_p020_0_p045_0_p060_0 like pattern
+        p for positive degrees
+        n for negative degrees
+
+    Returns
+    -------
+    lon_range, lat_range : tuple 2x2 
+        tuple of longitude and latitude range taken from the directory path
+
+
     '''
     import re
     # splitind = -6 if "cdf" in directory[-5:] else -5
@@ -359,12 +749,35 @@ def latlon_fromfile(directory):
         # lat_range, lon_range = [[-90, 90], [-180, 180]]
     return lon_range, lat_range
 
-# create subset
-def create_subset(filename_out,west, east,south, north,month_date):
-    """
-    # TODO add nice text
-    """
-    # TODO add test catch all for input 
+def create_subset(filename_out:str,west:float, east:float,south:float, north:float,month_date:datetime.datetime)->int:
+    ''' Create monthly subsets out of the larger satellite datasets
+
+    Parameters
+    ----
+    filename_out    :   str
+        the path and filename of the created subset
+    west   : float
+        western edge of the subset domain
+    east     :   float
+        eastern edge of the subset domain
+    south   :   float
+        southern edge of the subset domain
+    north    :   float
+        northern edge of the subset domain
+    month_date    : datetime.datetime
+        Variable name to be used for the Longitude variable
+
+    Returns
+    -------
+    status : integer
+        Returns 0 if subsets creation completed
+
+    TODO
+    ------- 
+    add option for yearly/other interval files, 
+    move end to end_date and month_dat to start_date and interval option
+    add test catch all for input 
+    '''
     print('Create subset.., step: Reading Datafiles....')
     # TropomiOFFLovp_NO2_None_01_Europe_201805_v.nc
     print('region',west,east,south,north,'%2.4i/%2.2i/'%(month_date.year,month_date.month))
@@ -434,7 +847,11 @@ def create_subset(filename_out,west, east,south, north,month_date):
                     dat_read = nc[variab_lib[key]][:]
                     shape_help = nc[variab_lib[lon_var]].shape[2]
                     dat_shape = dat_read.shape
-                    stime = datetime.datetime.strptime(nc[variab_lib[key]].getncattr('units')[19:],'%Y-%m-%d 00:00:00')
+                    try:
+                        stime = datetime.datetime.strptime(nc[variab_lib[key]].getncattr('units'),'seconds since %Y-%m-%d 00:00:00')
+                    except ValueError:
+                        # some tropomi files have a diff time format..
+                        stime =datetime.datetime.strptime( nc.getncattr('time_reference'),'%Y-%m-%dT00:00:00Z')
                     # print(list(dat_shape) + [shape_help])
                     # stime = datetime.datetime.strptime(nc.variables[variab_lib[key]].getncattr('units')[14:],'%Y-%m-%d 00:00:00')
                     dt = np.rollaxis(np.full([shape_help] + list(dat_shape), nc[variab_lib[key]][:]),0,3).ravel()
@@ -515,11 +932,32 @@ def create_subset(filename_out,west, east,south, north,month_date):
     status = 0
     return status
 
-def add_u_v_data(era_path, start, end, datas, lat_var_name, lon_var_name):
-    """
-    # Based on add_meteo @ dev package ECCC
+def add_u_v_data(era_path:str, start:datetime.datetime, end:datetime.datetime, datas:pd.DataFrame, lat_var_name:str, lon_var_name:str)->pd.DataFrame:
+    ''' add ECMWF data to satellite subsets.
+    Based on add_meteo @ dev package ECCC
+
+    Parameters
+    ----
+    era_path:str
     
-    """
+    start   : datetime.datetime
+        Start date of the interval over which ECMWF data is to be added
+    end     :   datetime.datetime
+        End date of the interval over which ECMWF data is to be added
+    datas   :   pd.DataFrame
+        Input dataframe containing longitude and latitude variables
+    lat_var_name    :   str
+        Variable name to be used for the latitude variable
+    lon_var_name    :   str
+        Variable name to be used for the Longitude variable
+
+    Returns
+    -------
+    datas : pandas dataframe M+2,N [other variables + u,v]
+        Pandas dataframe with the interpolated values of the ancillary data added to the dataframe.
+
+
+    '''
     print('Adding ERA5 u,v...')
     ndays = (end - start).days
     date_inter = start
@@ -575,14 +1013,11 @@ def add_u_v_data(era_path, start, end, datas, lat_var_name, lon_var_name):
     print('here era5', dataout.winddirection.min(), dataout.winddirection.max())
     return datas
 
+def interpolate_meteo(pixlon:np.ndarray, pixlat:np.ndarray, hh:np.ndarray, lon_dx:float, lat_dx:float, ancdata:netCDF4.Dataset)->pd.DataFrame:
+    '''Interpolate a dataset from regular grid to tropomi center positions.
+    Based on NN_regular_multiday.py @ dev package ECCC
 
-def interpolate_meteo(pixlon, pixlat, hh, lon_dx, lat_dx, ancdata):
-    '''Interpolate a dataset from regular grid to tropomi center positions
-    # TODO add interpolation following footprint shape? 
-    # TODO add triangulation algorithm Segers?
-    # TODO replace for scipy RGI interpolation?
-    # Based on NN_regular_multiday.py @ dev package ECCC
-    Args
+    Parameters
     ----
     pixlon : numpy.ndarray of float
         Numpy array of floats representing the longitudinal coordinates
@@ -603,7 +1038,10 @@ def interpolate_meteo(pixlon, pixlat, hh, lon_dx, lat_dx, ancdata):
         The interpolated values of the ancillary data, projected onto the
         given tropOMI dataset.
 
-
+    TODO
+    -------
+    add interpolation following footprint shape
+    replace for scipy RGI interpolation
     '''
     # s_t_t = time.time()
     # ensure float
@@ -644,14 +1082,6 @@ def interpolate_meteo(pixlon, pixlat, hh, lon_dx, lat_dx, ancdata):
     closestmin = (hh - closest) * 60
     # TODO We take the lowest 3 layers for now... change to surface pressure based 
     print('interpolating...')
-    # data_to_frame = np.array(
-    #     [[np.mean(((60 - np.array(closestmin_tmp)) / 60. * ancdatau_zero[closest_tmp, :3, lat_ind_tmp, lon_ind_tmp]) + (
-    #             (np.array(closestmin_tmp)) / 60. * ancdatau_zero[closest_tmp2, :3, lat_ind_tmp, lon_ind_tmp])) * 3.6,
-    #       np.mean(((60 - np.array(closestmin_tmp)) / 60. * ancdatav_zero[closest_tmp, :3, lat_ind_tmp, lon_ind_tmp]) + (
-    #               (np.array(closestmin_tmp)) / 60. * ancdatav_zero[closest_tmp2, :3, lat_ind_tmp, lon_ind_tmp])) * 3.6]
-    #      for
-    #      closestmin_tmp, closest_tmp, closest_tmp2, lat_ind_tmp, lon_ind_tmp in
-    #      zip(closestmin, closest, closest2, lat_ind, lon_ind)])
     data_to_frame = np.array(
         [np.mean(((60 - np.array(closestmin)[:,np.newaxis]) / 60. * ancdatau_zero[closest, :3, lat_ind, lon_ind]) + (
                 (np.array(closestmin)[:,np.newaxis]) / 60. * ancdatau_zero[closest2, :3, lat_ind, lon_ind]),1) * 3.6,
@@ -661,22 +1091,11 @@ def interpolate_meteo(pixlon, pixlat, hh, lon_dx, lat_dx, ancdata):
     datap = pd.DataFrame(data_to_frame.astype(float).T, columns=['u', 'v'])
     return datap
 
-# def chunking_dot(big_matrix, small_matrix, chunk_size=100):
-#     # quick solve memory error
-#     # https://stackoverflow.com/questions/27668462/numpy-dot-memoryerror-my-dot-very-slow-but-works-why
-#     # Make a copy if the array is not already contiguous
-#     print(big_matrix.shape,small_matrix.shape)
-#     small_matrix = np.ascontiguousarray(small_matrix)
-#     print(big_matrix.shape[0], small_matrix.shape[1])
-#     R = np.empty((big_matrix.shape[0], small_matrix.shape[1]))
-#     for i in range(0, R.shape[0], chunk_size):
-#         end = i + chunk_size
-#         R[i:end] = np.dot(big_matrix[i:end,:], small_matrix)
-#     return R
-
 if __name__ == "__main__":
     # %%
+    # if not working with jupyter interactive python ignore the %%, 
     # test operations?
+    print('potentially test all variables and functions here')
     print('test globals',LOCAL_DATA_FOLDER)
 
 
