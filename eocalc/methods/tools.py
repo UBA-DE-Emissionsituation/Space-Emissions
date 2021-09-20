@@ -1045,9 +1045,9 @@ def add_u_v_data(era_path: str, start: datetime.datetime, end: datetime.datetime
         else:
             ncera = netCDF4.Dataset(era_file_to_read)
         # calc longitude latitude positions in grid
-        lonstep, latstep = np.round(np.abs(np.diff(ncera['longitude'][:2])), 3)[0], \
-            np.round(np.abs(np.diff(ncera['latitude'][:2])), 3)[
-            0]  # 0.25, 0.25 resolution
+        # lonstep, latstep = np.round(np.abs(np.diff(ncera['longitude'][:2])), 3)[0], \
+        #     np.round(np.abs(np.diff(ncera['latitude'][:2])), 3)[
+        #     0]  # 0.25, 0.25 resolution
         # select all obs for this day
         sel = ((dates.date2num(datas.time) >= dates.date2num(date_inter))
                & (dates.date2num(datas.time) < dates.date2num(next_date)))
@@ -1060,8 +1060,7 @@ def add_u_v_data(era_path: str, start: datetime.datetime, end: datetime.datetime
             dataout = interpolate_meteo(datas[lon_var_name][sel].values, datas[lat_var_name][sel].values,
                                         datas['hh'][sel].values +
                                         datas['minmin'][sel].values /
-                                        60., lonstep, latstep,
-                                        ncera)  # ,ncera_v)
+                                        60., ncera)  # ,ncera_v)
             print('test', dataout.shape)
             dataout.loc[:, 'windspeed'] = np.sqrt(
                 dataout['u'].values ** 2 + dataout['v'].values ** 2)
