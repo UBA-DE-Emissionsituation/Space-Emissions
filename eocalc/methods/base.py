@@ -105,7 +105,6 @@ class EOEmissionCalculator(ABC):
             Minimum region size in km² (square kilometers).
 
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -118,7 +117,6 @@ class EOEmissionCalculator(ABC):
         MultiPolygon
             Representation of the area the method can be applied to.
         """
-        pass
 
     @classmethod
     def covers(cls, region: MultiPolygon) -> bool:
@@ -150,7 +148,6 @@ class EOEmissionCalculator(ABC):
             Minimum period in number of days.
 
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -164,7 +161,6 @@ class EOEmissionCalculator(ABC):
             Specific day the method becomes available.
 
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -178,7 +174,6 @@ class EOEmissionCalculator(ABC):
             Specific day the method becomes unavailable.
 
         """
-        pass
 
     @staticmethod
     @abstractmethod
@@ -197,7 +192,6 @@ class EOEmissionCalculator(ABC):
             If this method support estimation of given pollutant.
 
         """
-        pass
 
     @abstractmethod
     def run(self, region: MultiPolygon, period: DateRange, pollutant: Pollutant) -> dict[str, DataFrame]:
@@ -219,7 +213,6 @@ class EOEmissionCalculator(ABC):
             The emission values, both as total numbers and as a grid.
 
         """
-        pass
 
     def _validate(self, region: MultiPolygon, period: DateRange, pollutant: Pollutant):
         """Check inputs to run() method. Raise ValueError in case of a problem."""
