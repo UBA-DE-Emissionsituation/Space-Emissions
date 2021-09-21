@@ -30,6 +30,7 @@ TEMIS_CELL_UNCERTAINTY = 1000
 
 
 class TropomiMonthlyMeanAggregator(EOEmissionCalculator):
+    """Method to calculate NO2 emissions from TEMIS monthly Tropomi data."""
 
     @staticmethod
     def minimum_area_size() -> int:
